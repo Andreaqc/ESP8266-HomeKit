@@ -392,7 +392,6 @@ void    addCharacteristic(cJSON *characteristics, int aid, int iid, char *brand,
     cJSON_AddNumberToObject(acc_items[iid].json, "iid",  iid );
     cJSON_AddStringToObject(acc_items[iid].json, "type", longid );
     cJSON_AddItemToObject(  acc_items[iid].json, "perms", perms=cJSON_CreateArray());
-    //cJSON_AddFalseToObject( acc_items[iid].json, "bonjour");
     //from id pick up specific settings
     switch (cType) {
         case BRIGHTNESS_C: {
@@ -527,8 +526,10 @@ void    addCharacteristic(cJSON *characteristics, int aid, int iid, char *brand,
     //addItem(aid,iid,format,valuestring,change_cb);
     if (valuestring) {
         if (!strcmp(format,BOOLEAN)){
-            if ( !strcmp(valuestring,"0") || !strcmp(valuestring,"false") ) intval=0; else intval=1;
-            cJSON_AddItemToObject(acc_items[iid].json, "value", value=cJSON_CreateBool(intval) );
+            intval = 0;
+            if (!strcmp(valuestring,"1") || !strcmp(valuestring,"true"))
+                intval = 1;            
+            cJSON_AddItemToObject(acc_items[iid].json, "value", value=cJSON_CreateBool(intval));
         }
         if (!strcmp(format,STRING) || !strcmp(format,TLV8) || !strcmp(format,DATA) ){
             cJSON_AddItemToObject(acc_items[iid].json, "value", value=cJSON_CreateString(valuestring) );
@@ -940,68 +941,46 @@ h204_send(void *arg)
 }
 
 /******************************************************************************
- * FunctionName : data_send
+ * FunctionName : response_send
  * Description  : processing the data as http format and send to the client or server
  * Parameters   : arg -- argument to set for client or server
- *                responseOK -- true or false
+ *                resp_code -- http response code
  *                psend -- The send data
  * Returns      :
 *******************************************************************************/
 LOCAL void ICACHE_FLASH_ATTR
-data_send(void *arg, bool responseOK, char *psend)
+response_send(void *arg, int resp_code, char *psend)
 {
     crypto_parm *pcryp = arg;
     uint16 length = 0;
     char *pbuf = NULL;
     char httphead[256];
-    memset(httphead, 0, 256);
-
-    if (responseOK) {
-        sprintf(httphead,
-                   "HTTP/1.0 200 OK\r\nContent-Length: %d\r\n",
-                   psend ? strlen(psend) : 0);
-
+    
+    if (resp_code == 200) {
+        sprintf(httphead,"HTTP/1.0 200 OK\r\nContent-Length: %d\r\n", psend ? strlen(psend) : 0);
         if (psend) {
-            sprintf(httphead + strlen(httphead),
-                       "Connection: keep-alive\r\nContent-type: application/hap+json\r\n\r\n");
+            sprintf(httphead + strlen(httphead),"Connection: keep-alive\r\nContent-type: application/hap+json\r\n\r\n");
             length = strlen(httphead) + strlen(psend);
             pbuf = (char *)zalloc(length + 1 + 36); //better calculate +18 per 0x400
             memcpy(pbuf, httphead, strlen(httphead));
             memcpy(pbuf + strlen(httphead), psend, strlen(psend));
         } else {
-            sprintf(httphead + strlen(httphead), "\n");
+            sprintf(httphead + strlen(httphead), "\r\n");
             length = strlen(httphead);
         }
-    } else {
-        sprintf(httphead, "HTTP/1.0 400 BadRequest\r\n\
-Content-Length: 0\r\nServer: lwIP/1.4.0\r\n\n");
+    } else if (resp_code == 400) {
+        sprintf(httphead, "HTTP/1.0 400 BadRequest\r\nContent-Length: 0\r\nServer: lwIP/1.4.0\r\n\r\n");
         length = strlen(httphead);
+        pbuf = httphead;
+    } else if (resp_code == 204) {
+        sprintf(httphead, "HTTP/1.1 204  No Content\r\nConnection: keep-alive\r\nContent-type: application/hap+json\r\n\r\n");
+        length = strlen(httphead);   
+        pbuf = httphead;     
     }
 
-    if (psend) {
-        if (pcryp->encrypted) encrypt(pcryp, pbuf, &length);
+    if (pcryp->encrypted) encrypt(pcryp, pbuf, &length);
         espconn_sent(pcryp->pespconn, pbuf, length);
-    } else {
-        espconn_sent(pcryp->pespconn, httphead, length);
-    }
-
-    if (pbuf) {
-        free(pbuf);
-        pbuf = NULL;
-    }
-}
-
-/******************************************************************************
- * FunctionName : response_send
- * Description  : processing the send result
- * Parameters   : arg -- argument to set for client or server
- *                responseOK --  true or false
- * Returns      : none
-*******************************************************************************/
-LOCAL void ICACHE_FLASH_ATTR
-response_send(void *arg, bool responseOK)
-{
-    data_send(arg, responseOK, NULL);
+    free(pbuf);
 }
 
 /******************************************************************************
@@ -1071,7 +1050,7 @@ server_recv(void *arg, char *pusrdata, unsigned short length)
         
         parse_flag = save_data(pusrdata, length);
         if (parse_flag == false) {
-            response_send(pcryp, false);
+            response_send(pcryp, 400, NULL);
         }
 
         //os_printf("dat_sumlength: %d\n",dat_sumlength);
@@ -1087,14 +1066,6 @@ server_recv(void *arg, char *pusrdata, unsigned short length)
                 os_printf("GET/");
                 os_printf("S: %s C: %s F: %s\n",pURL_Frame->pSelect,pURL_Frame->pCommand,pURL_Frame->pFilename);
                 #endif
-
-                if (strcmp(pURL_Frame->pSelect, "identify") == 0) {
-                    #ifdef DEBUG1
-                    os_printf("identify\n");
-                    #endif
-                    //do identify routine as a task
-                    h204_send(pcryp);
-                }
                 if (strcmp(pURL_Frame->pSelect, "accessories") == 0 && pcryp->encrypted) {
                     #ifdef DEBUG1
                     os_printf("accessories\n");
@@ -1121,7 +1092,7 @@ server_recv(void *arg, char *pusrdata, unsigned short length)
                     os_printf("characteristics\n");
                     #endif
                     chars=parse_cgi(pURL_Frame->pFilename);
-                    data_send(pcryp, true, chars);
+                    response_send(pcryp, 200, chars);
                     free(chars);
                 }
                 #ifdef FACTORY
@@ -1137,7 +1108,7 @@ server_recv(void *arg, char *pusrdata, unsigned short length)
 //                     if (strcmp(pURL_Frame->pFilename, "info") == 0) {
 //                     } else if (strcmp(pURL_Frame->pFilename, "status") == 0) {
 //                     } else {
-//                         response_send(ptrespconn, false);
+//                         response_send(ptrespconn, 400, NULL);
 //                     }
 //              } 
                 }break; //GET
@@ -1310,12 +1281,12 @@ server_recv(void *arg, char *pusrdata, unsigned short length)
                             struct jsontree_context js;
                             jsontree_setup(&js, (struct jsontree_value *)&StatusTree, json_putchar);
                             json_parse(&js, pParseBuffer);
-                            response_send(ptrespconn, true);
+                            response_send(ptrespconn, 200, NULL);
                         } else {
-                            response_send(ptrespconn, false);
+                            response_send(ptrespconn, 400, NULL);
                         } /**/
                     } else {
-                        response_send(pcryp, false);
+                        response_send(pcryp, 400, NULL);
                     }
                 }
                 }break; //POST
@@ -1772,8 +1743,8 @@ void crypto_init()
     #endif
     if (strcmp(flash,signature)) {
         #ifdef DEBUG0
-        os_printf("initializing flash in 15 seconds\n");
-        vTaskDelay(3000);
+        //os_printf("initializing flash in 15 seconds\n");
+        //vTaskDelay(3000);
         os_printf("initializing flash\n");
         #endif
         spi_flash_erase_sector(sector);
@@ -2581,7 +2552,7 @@ void encrypt(void *arg, char *data, unsigned short *length)
     #ifdef DEBUG0
     //os_printf("txt: ");
     for (r=0;r<*length;r++) os_printf("%c",in[r]);
-    os_printf("\n"); /**/
+    os_printf("\n"); 
     #endif
     //os_printf("system time: %d\n",system_get_time()/1000);
     #ifdef DEBUG2
@@ -2603,4 +2574,3 @@ void encrypt(void *arg, char *data, unsigned short *length)
 
     free(in);
 }
-
